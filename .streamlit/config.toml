@@ -1,0 +1,18 @@
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "dark"
+primaryColor = "#a855f7"
+backgroundColor = "#0b0b12"
+secondaryBackgroundColor = "#11111a"
+textColor = "#ffffff"
+linkColor = "#a855f7"
+showSidebarBorder = true
+
+[theme.sidebar]
+backgroundColor = "#171723"
+secondaryBackgroundColor = "#11111a"
+textColor = "#ffffff"
+primaryColor = "#a855f7"
+linkColor = "#a855f7"
