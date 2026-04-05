@@ -38,6 +38,9 @@ OPCOES_PERIODO_RAPIDO = [
     "Mês anterior",
 ]
 
+DATA_MIN_ACEITAVEL = pd.Timestamp("2025-01-01")
+DATA_MAX_ACEITAVEL = pd.Timestamp("2035-12-31")
+
 
 # =========================
 # ESTILO
@@ -179,7 +182,6 @@ st.markdown("""
         box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.20) !important;
     }
 
-    /* Filtro custom de matrícula */
     .matricula-bolinha {
         width: 12px;
         height: 12px;
@@ -214,6 +216,7 @@ def inicializar_estado_filtros():
         "data_fim": None,
         "numero_min_personalizado": None,
         "numero_max_personalizado": None,
+        "mostrar_diagnostico": False,
     }
 
     for chave, valor in defaults.items():
@@ -257,10 +260,7 @@ def limpar_texto(valor):
 
 def normalizar_colunas(df):
     df.columns = [
-        str(col)
-        .replace("\ufeff", "")
-        .replace("\xa0", " ")
-        .strip()
+        str(col).replace("\ufeff", "").replace("\xa0", " ").strip()
         for col in df.columns
     ]
     return df
@@ -310,13 +310,10 @@ def converter_data_robusta(serie):
         data_flex = pd.to_datetime(texto[faltantes], errors="coerce", dayfirst=True)
         data_iso.loc[faltantes] = data_flex
 
-    data_min_aceitavel = pd.Timestamp("2024-01-01")
-    data_max_aceitavel = pd.Timestamp("2035-12-31")
-
     data_iso = data_iso.where(
         data_iso.isna() | (
-            (data_iso >= data_min_aceitavel) &
-            (data_iso <= data_max_aceitavel)
+            (data_iso >= DATA_MIN_ACEITAVEL) &
+            (data_iso <= DATA_MAX_ACEITAVEL)
         ),
         pd.NaT
     )
@@ -331,10 +328,33 @@ def extrair_url_read_ai(valor):
     texto = str(valor).strip()
     match = re.search(PADRAO_READ_AI, texto)
 
-    if match:
-        return match.group(0)
+    if not match:
+        return pd.NA
 
+    url = match.group(0).strip()
+    url = url.split("?", 1)[0]
+    url = url.split("#", 1)[0]
+    url = url.rstrip("/")
+
+    return url if url else pd.NA
+
+
+def encontrar_link_na_linha(row):
+    for valor in row:
+        link = extrair_url_read_ai(valor)
+        if pd.notna(link):
+            return link
     return pd.NA
+
+
+def status_eh_presente(valor):
+    if pd.isna(valor):
+        return False
+
+    texto = str(valor).strip().lower()
+    texto = re.sub(r"\s+", " ", texto)
+
+    return texto in {"presente", "presença", "presenca", "compareceu"}
 
 
 def extrair_cidade(matricula):
@@ -360,6 +380,24 @@ def extrair_numero_matricula(matricula):
         return int(numeros[-1])
 
     return pd.NA
+
+
+def matricula_valida(valor):
+    if pd.isna(valor):
+        return False
+
+    texto = str(valor).strip().upper()
+
+    if texto in {"", "0", "N/D", "NA", "NÃO INFORMADO", "NAO INFORMADO"}:
+        return False
+
+    return bool(re.fullmatch(r"(PDITA|PDBD)\d+", texto))
+
+
+def nome_parece_matricula(valor):
+    if pd.isna(valor):
+        return False
+    return matricula_valida(valor)
 
 
 def normalizar_agente_sucesso(valor):
@@ -407,21 +445,9 @@ def normalizar_texto_busca(texto):
     return texto
 
 
-def matricula_valida(valor):
-    if pd.isna(valor):
-        return False
-
-    texto = str(valor).strip().upper()
-
-    if texto in {"", "0", "N/D", "NA", "NÃO INFORMADO", "NAO INFORMADO"}:
-        return False
-
-    return bool(re.fullmatch(r"(PDITA|PDBD)\d+", texto))
-
-
 def normalizar_status_monitoria(valor):
     if pd.isna(valor):
-        return "Presente"
+        return "Não informado"
 
     texto = str(valor).strip()
     texto_normalizado = re.sub(r"\s+", " ", texto).lower()
@@ -434,9 +460,12 @@ def normalizar_status_monitoria(valor):
         "faltou": "Faltou",
         "ausente": "Faltou",
         "falta": "Faltou",
-        "não informado": "Presente",
-        "nao informado": "Presente",
-        "": "Presente"
+        "aluno não agendado(fantasma)": "Aluno não agendado(Fantasma)",
+        "aluno nao agendado(fantasma)": "Aluno não agendado(Fantasma)",
+        "aguardando desligamento": "Aguardando desligamento",
+        "não informado": "Não informado",
+        "nao informado": "Não informado",
+        "": "Não informado"
     }
 
     return mapa_status.get(texto_normalizado, texto)
@@ -536,7 +565,19 @@ def aplicar_busca_inteligente(df, termo_busca):
     return df[mascara]
 
 
+def adicionar_motivo(df_erros, mascara, motivo):
+    df_erros.loc[mascara, "motivos_erro"] = (
+        df_erros.loc[mascara, "motivos_erro"].fillna("") + motivo + " | "
+    )
+    return df_erros
+
+
 def padronizar_dataframe(df, arquivo_origem):
+    df_original = df.copy()
+    df_original = normalizar_colunas(df_original)
+    df_original["arquivo_origem"] = arquivo_origem
+    df_original["linha_origem"] = range(1, len(df_original) + 1)
+
     colunas_finais = [
         "nome",
         "matricula",
@@ -547,7 +588,8 @@ def padronizar_dataframe(df, arquivo_origem):
         "resumo",
         "comentarios",
         "justificativa",
-        "arquivo_origem"
+        "arquivo_origem",
+        "linha_origem",
     ]
 
     for col in colunas_finais:
@@ -556,6 +598,8 @@ def padronizar_dataframe(df, arquivo_origem):
 
     df = df[colunas_finais].copy()
     df["arquivo_origem"] = arquivo_origem
+    if "linha_origem" not in df.columns:
+        df["linha_origem"] = range(1, len(df) + 1)
 
     for col in [
         "nome",
@@ -569,7 +613,27 @@ def padronizar_dataframe(df, arquivo_origem):
     ]:
         df[col] = df[col].apply(limpar_texto)
 
+    mascara_campos_trocados = df["nome"].apply(nome_parece_matricula) & (~df["matricula"].apply(matricula_valida))
+    if mascara_campos_trocados.any():
+        nome_original = df.loc[mascara_campos_trocados, "nome"].copy()
+        matricula_original = df.loc[mascara_campos_trocados, "matricula"].copy()
+        df.loc[mascara_campos_trocados, "matricula"] = nome_original
+        df.loc[mascara_campos_trocados, "nome"] = matricula_original
+
     df["link_monitoria"] = df["link_monitoria"].apply(extrair_url_read_ai)
+
+    mascaras_sem_link = df["link_monitoria"].isna()
+    if mascaras_sem_link.any():
+        df.loc[mascaras_sem_link, "link_monitoria"] = df_original.loc[mascaras_sem_link].apply(
+            encontrar_link_na_linha,
+            axis=1
+        )
+
+    resumo_tem_link = df["resumo"].apply(extrair_url_read_ai)
+    mascara_resumo_com_link = df["link_monitoria"].isna() & resumo_tem_link.notna()
+    if mascara_resumo_com_link.any():
+        df.loc[mascara_resumo_com_link, "link_monitoria"] = resumo_tem_link[mascara_resumo_com_link]
+
     df["data"] = converter_data_robusta(df["data"])
 
     df["nome"] = df["nome"].fillna("Não informado")
@@ -658,10 +722,10 @@ def ler_relatorios_monitoria(caminho):
         "Data": "data",
         "Agente de Sucesso": "agente_sucesso",
         "Status da Monitoria": "status_monitoria",
-        "Relatório do Read IA": "resumo",
-        "Link do Read IA": "link_monitoria",
         "Motivo da Falta": "justificativa",
-        "Outro Motivo:": "comentarios"
+        "Outro Motivo:": "comentarios",
+        "Relatório do Read IA": "resumo",
+        "Link do Read IA": "link_monitoria"
     })
 
     return padronizar_dataframe(df, Path(caminho).name)
@@ -766,14 +830,14 @@ def ler_arquivo(caminho):
 
 
 # =========================
-# CONSOLIDAÇÃO
+# CONSOLIDAÇÃO + DIAGNÓSTICO
 # =========================
 @st.cache_data
-def consolidar_bases(pasta_dados):
+def consolidar_bases_com_diagnostico(pasta_dados):
     pasta = Path(pasta_dados)
 
     if not pasta.exists():
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     arquivos = sorted(pasta.glob("*.csv"))
     dfs = []
@@ -787,39 +851,53 @@ def consolidar_bases(pasta_dados):
             continue
 
     if not dfs:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     bruto = pd.concat(dfs, ignore_index=True)
+    bruto = corrigir_matriculas_por_historico(bruto)
 
-    validos = bruto.dropna(subset=["link_monitoria"]).copy()
+    bruto["cidade"] = bruto["matricula"].apply(extrair_cidade)
+    bruto["numero_matricula"] = bruto["matricula"].apply(extrair_numero_matricula)
 
-    validos["status_monitoria"] = validos["status_monitoria"].apply(normalizar_status_monitoria)
-    validos["status_monitoria"] = validos["status_monitoria"].replace(
-        {"Não informado": "Presente"}
-    ).fillna("Presente")
+    erros = bruto.copy()
+    erros["motivos_erro"] = ""
 
-    validos = corrigir_matriculas_por_historico(validos)
+    mascara_status_invalido = ~erros["status_monitoria"].apply(status_eh_presente)
+    erros = adicionar_motivo(erros, mascara_status_invalido, "Status diferente de Presente")
 
-    validos["matricula"] = validos["matricula"].fillna("Não informado")
-    validos["cidade"] = validos["cidade"].fillna("Não informado")
+    mascara_sem_link = erros["link_monitoria"].isna()
+    erros = adicionar_motivo(erros, mascara_sem_link, "Link da Read.ai não encontrado")
 
-    validos["data"] = validos["data"].where(
-        validos["data"].isna() | (
-            (validos["data"] >= pd.Timestamp("2024-01-01")) &
-            (validos["data"] <= pd.Timestamp("2035-12-31"))
-        ),
-        pd.NaT
-    )
+    mascara_data_invalida = erros["data"].isna()
+    erros = adicionar_motivo(erros, mascara_data_invalida, "Data inválida ou fora da faixa aceitável")
+
+    mascara_matricula_invalida = ~erros["matricula"].apply(matricula_valida)
+    erros = adicionar_motivo(erros, mascara_matricula_invalida, "Matrícula inválida ou não recuperada")
+
+    mascara_cidade_invalida = ~erros["cidade"].isin(["Itabira", "Bom Despacho"])
+    erros = adicionar_motivo(erros, mascara_cidade_invalida, "Cidade não identificada pela matrícula")
+
+    erros["motivos_erro"] = erros["motivos_erro"].str.rstrip(" | ")
+
+    rejeitados = erros[erros["motivos_erro"] != ""].copy()
+
+    validos = bruto.copy()
+    validos = validos[validos["status_monitoria"].apply(status_eh_presente)].copy()
+    validos = validos.dropna(subset=["link_monitoria"]).copy()
+    validos = validos[validos["data"].notna()].copy()
+    validos = validos[validos["matricula"].apply(matricula_valida)].copy()
+    validos = validos[validos["cidade"].isin(["Itabira", "Bom Despacho"])].copy()
+
+    validos["status_monitoria"] = "Presente"
 
     final = validos.drop_duplicates(
         subset=["nome", "matricula", "data", "link_monitoria"],
         keep="first"
     ).copy()
 
-    final["data_formatada"] = final["data"].dt.strftime("%d/%m/%Y")
-    final["data_formatada"] = final["data_formatada"].fillna("Sem data")
+    final = final.sort_values(by="data", ascending=False, na_position="last")
 
-    return final.sort_values(by="data", ascending=False, na_position="last")
+    return final, rejeitados
 
 
 # =========================
@@ -926,8 +1004,8 @@ def aplicar_filtros(df):
 
     datas_validas = df["data"].dropna()
     datas_validas = datas_validas[
-        (datas_validas >= pd.Timestamp("2024-01-01")) &
-        (datas_validas <= pd.Timestamp("2035-12-31"))
+        (datas_validas >= DATA_MIN_ACEITAVEL) &
+        (datas_validas <= DATA_MAX_ACEITAVEL)
     ]
 
     if datas_validas.empty:
@@ -954,6 +1032,11 @@ def aplicar_filtros(df):
         "Mês específico",
         options=mes_opcoes,
         key="mes_especifico"
+    )
+
+    st.sidebar.checkbox(
+        "Mostrar diagnóstico",
+        key="mostrar_diagnostico"
     )
 
     data_inicio_default, data_fim_default = obter_intervalo_periodo_rapido(
@@ -1045,7 +1128,7 @@ if not Path(PASTA_DADOS).exists():
     st.error("A pasta 'dadosAtualizados' não foi encontrada.")
     st.stop()
 
-df = consolidar_bases(PASTA_DADOS)
+df, df_rejeitados = consolidar_bases_com_diagnostico(PASTA_DADOS)
 
 if df.empty:
     st.error("Nenhum CSV válido foi encontrado na pasta 'dadosAtualizados'.")
@@ -1056,12 +1139,147 @@ df_filtrado = aplicar_filtros(df)
 total_monitorias = len(df_filtrado)
 st.metric("Total de monitorias", total_monitorias)
 
+if st.session_state.get("mostrar_diagnostico", False):
+    st.divider()
+    st.subheader("Diagnóstico dos dados")
+
+    base_diag = df_filtrado.copy()
+
+    resumo_mes = (
+        base_diag.dropna(subset=["data"])
+        .assign(mes=base_diag["data"].dt.to_period("M").astype(str))
+        .groupby("mes")
+        .size()
+        .reset_index(name="total")
+        .sort_values("mes")
+    )
+
+    resumo_arquivo = (
+        base_diag.groupby("arquivo_origem")
+        .size()
+        .reset_index(name="total")
+        .sort_values("total", ascending=False)
+    )
+
+    resumo_status = (
+        base_diag.groupby("status_monitoria")
+        .size()
+        .reset_index(name="total")
+        .sort_values("total", ascending=False)
+    )
+
+    resumo_cidade = (
+        base_diag.groupby("cidade")
+        .size()
+        .reset_index(name="total")
+        .sort_values("total", ascending=False)
+    )
+
+    duplicados = base_diag[
+        base_diag.duplicated(subset=["nome", "matricula", "data", "link_monitoria"], keep=False)
+    ].copy()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("**Monitorias por mês**")
+        st.dataframe(resumo_mes, hide_index=True, width="stretch")
+
+        st.write("**Monitorias por cidade**")
+        st.dataframe(resumo_cidade, hide_index=True, width="stretch")
+
+    with col2:
+        st.write("**Monitorias por arquivo**")
+        st.dataframe(resumo_arquivo, hide_index=True, width="stretch")
+
+        st.write("**Status encontrados no consolidado válido**")
+        st.dataframe(resumo_status, hide_index=True, width="stretch")
+
+    st.write(f"**Menor data válida:** {base_diag['data'].min()}")
+    st.write(f"**Maior data válida:** {base_diag['data'].max()}")
+    st.write(f"**Possíveis duplicados encontrados no consolidado válido:** {len(duplicados)}")
+
+    st.subheader("Registros rejeitados / inconsistentes")
+
+    if df_rejeitados.empty:
+        st.success("Nenhum registro rejeitado foi encontrado.")
+    else:
+        resumo_rejeitados = (
+            df_rejeitados.assign(motivo_principal=df_rejeitados["motivos_erro"].str.split(" \\| ").str[0])
+            .groupby("motivo_principal")
+            .size()
+            .reset_index(name="total")
+            .sort_values("total", ascending=False)
+        )
+
+        st.write("**Resumo dos motivos de rejeição**")
+        st.dataframe(resumo_rejeitados, hide_index=True, width="stretch")
+
+        col3, col4 = st.columns(2)
+
+        with col3:
+            rejeitados_por_arquivo = (
+                df_rejeitados.groupby("arquivo_origem")
+                .size()
+                .reset_index(name="total")
+                .sort_values("total", ascending=False)
+            )
+            st.write("**Rejeitados por arquivo**")
+            st.dataframe(rejeitados_por_arquivo, hide_index=True, width="stretch")
+
+        with col4:
+            rejeitados_por_cidade = (
+                df_rejeitados.groupby("cidade")
+                .size()
+                .reset_index(name="total")
+                .sort_values("total", ascending=False)
+            )
+            st.write("**Classificação de cidade nos rejeitados**")
+            st.dataframe(rejeitados_por_cidade, hide_index=True, width="stretch")
+
+        st.write("**Detalhamento dos registros rejeitados**")
+        tabela_rejeitados = df_rejeitados[
+            [
+                "linha_origem",
+                "arquivo_origem",
+                "data",
+                "nome",
+                "matricula",
+                "cidade",
+                "agente_sucesso",
+                "status_monitoria",
+                "link_monitoria",
+                "motivos_erro"
+            ]
+        ].rename(columns={
+            "linha_origem": "Linha no arquivo",
+            "arquivo_origem": "Arquivo de origem",
+            "data": "Data",
+            "nome": "Nome",
+            "matricula": "Matrícula",
+            "cidade": "Cidade",
+            "agente_sucesso": "Agente de sucesso",
+            "status_monitoria": "Status encontrado",
+            "link_monitoria": "Link encontrado",
+            "motivos_erro": "Motivo da rejeição"
+        })
+
+        st.dataframe(
+            tabela_rejeitados,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
+                "Link encontrado": st.column_config.LinkColumn("Link encontrado", display_text="Abrir link")
+            }
+        )
+
 st.divider()
 st.subheader("Monitorias consolidadas")
 
 tabela = df_filtrado[
     [
-        "data_formatada",
+        "data",
         "nome",
         "matricula",
         "cidade",
@@ -1070,7 +1288,7 @@ tabela = df_filtrado[
         "link_monitoria"
     ]
 ].rename(columns={
-    "data_formatada": "Data",
+    "data": "Data",
     "nome": "Nome",
     "matricula": "Matrícula",
     "cidade": "Cidade",
@@ -1084,6 +1302,10 @@ st.dataframe(
     width="stretch",
     hide_index=True,
     column_config={
+        "Data": st.column_config.DateColumn(
+            "Data",
+            format="DD/MM/YYYY"
+        ),
         "Link da monitoria": st.column_config.LinkColumn(
             "Link da monitoria",
             display_text="Abrir link"
@@ -1092,7 +1314,7 @@ st.dataframe(
 )
 
 csv_export = (
-    df_filtrado.drop(columns=["data_formatada", "arquivo_origem", "nome_chave"], errors="ignore")
+    df_filtrado.drop(columns=["nome_chave"], errors="ignore")
     .to_csv(index=False, encoding="utf-8-sig")
     .encode("utf-8-sig")
 )
